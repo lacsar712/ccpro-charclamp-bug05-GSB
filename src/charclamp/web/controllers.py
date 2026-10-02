@@ -11,8 +11,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from charclamp.domain.models import BurnShift, Clamp, User
-from charclamp.domain.draw_acl import api_allows_draw, chip_allows_draw, drawer_shows_draw_button
-from charclamp.domain.rules import RuleError, assert_can_set_clamp_status, can_mark_clamp_drawn
+from charclamp.domain.draw_acl import user_can_draw
+from charclamp.domain.rules import (
+    RuleError,
+    assert_can_set_clamp_status,
+    can_mark_clamp_drawn,
+    mark_clamp_drawn,
+)
 from charclamp.infra.db import SessionLocal
 from charclamp.infra.security import verify_password
 
@@ -126,7 +131,7 @@ class TimelineController(Controller):
         flash, flash_cat = _pop_flash(request)
         clamp_id = _parse_optional_int(request.query_params.get("clamp_id"))
         ctx = await _load_timeline_context(clamp_id)
-        ctx["chip_can_draw"] = chip_allows_draw(request.user)
+        ctx["chip_can_draw"] = user_can_draw(request.user)
         return Template(
             template_name="timeline.html",
             context={
@@ -143,7 +148,7 @@ class TimelineController(Controller):
             return Redirect("/login")
         clamp_id = _parse_optional_int(request.query_params.get("clamp_id"))
         ctx = await _load_timeline_context(clamp_id)
-        ctx["chip_can_draw"] = chip_allows_draw(request.user)
+        ctx["chip_can_draw"] = user_can_draw(request.user)
         return Template(
             template_name="partials/board.html",
             context={
@@ -181,10 +186,16 @@ class TimelineController(Controller):
             clamp = result.scalar_one_or_none()
             if not clamp:
                 return Redirect("/")
-        peak_ok, drawn_msg = can_mark_clamp_drawn(clamp)
-        show_btn = peak_ok and drawer_shows_draw_button(request.user)
-        if peak_ok and not drawer_shows_draw_button(request.user):
-            drawn_msg = "当前账号在抽屉里看不到出炭按钮"
+        peak_ok, rule_msg = can_mark_clamp_drawn(clamp)
+        can_draw = user_can_draw(request.user)
+        # 抽屉与剪影共用同一授权结论：仅管理员且满足峰值规则才给按钮。
+        show_btn = peak_ok and can_draw
+        if not peak_ok:
+            drawn_msg = rule_msg
+        elif not can_draw:
+            drawn_msg = "仅管理员可标记已出炭，当前账号（操作工）无权操作"
+        else:
+            drawn_msg = ""
         return Template(
             template_name="partials/drawer_clamp.html",
             context={
@@ -243,26 +254,18 @@ class ClampController(Controller):
         request: Request,
         clamp_id: int,
     ) -> Redirect:
-        """剪影捷径：第三套授权，无行锁。"""
+        """剪影捷径：与抽屉/状态接口同一授权、同一加锁写入口。"""
         if not request.user:
             return Redirect("/login")
         async with SessionLocal() as db:
-            result = await db.execute(
-                select(Clamp)
-                .where(Clamp.id == clamp_id)
-                .options(selectinload(Clamp.shifts))
-            )
-            clamp = result.scalar_one_or_none()
-            if not clamp:
-                return Redirect("/")
             try:
-                if not chip_allows_draw(request.user):
-                    raise RuleError("剪影入口拒绝出炭")
-                assert_can_set_clamp_status(clamp, Clamp.STATUS_DRAWN)
-                clamp.status = Clamp.STATUS_DRAWN
+                if not user_can_draw(request.user):
+                    raise RuleError("仅管理员可标记已出炭，当前账号无权操作")
+                clamp = await mark_clamp_drawn(db, clamp_id)
                 await db.commit()
                 _set_flash(request, f"窑 {clamp.code} 状态已更新", "ok")
             except RuleError as exc:
+                await db.rollback()
                 _set_flash(request, str(exc), "error")
         return Redirect(f"/?clamp_id={clamp_id}")
 
@@ -277,21 +280,22 @@ class ClampController(Controller):
             return Redirect("/login")
         new_status = (data.get("status") or "").strip()
         async with SessionLocal() as db:
-            result = await db.execute(
-                select(Clamp)
-                .where(Clamp.id == clamp_id)
-                .options(selectinload(Clamp.shifts))
-            )
-            clamp = result.scalar_one_or_none()
-            if not clamp:
-                return Redirect("/")
             try:
-                if new_status == Clamp.STATUS_DRAWN and not api_allows_draw(request.user):
-                    raise RuleError("当前账号不能标记已出炭")
-                assert_can_set_clamp_status(clamp, new_status)
-                clamp.status = new_status
+                if new_status == Clamp.STATUS_DRAWN:
+                    # 与剪影同一授权：仅管理员；接口侧强制，藏不住按钮也绕不过。
+                    if not user_can_draw(request.user):
+                        raise RuleError("仅管理员可标记已出炭，当前账号无权操作")
+                    clamp = await mark_clamp_drawn(db, clamp_id)
+                else:
+                    result = await db.execute(select(Clamp).where(Clamp.id == clamp_id))
+                    clamp = result.scalar_one_or_none()
+                    if not clamp:
+                        return Redirect("/")
+                    assert_can_set_clamp_status(clamp, new_status)
+                    clamp.status = new_status
                 await db.commit()
                 _set_flash(request, f"窑 {clamp.code} 状态已更新", "ok")
             except RuleError as exc:
+                await db.rollback()
                 _set_flash(request, str(exc), "error")
         return Redirect(f"/?clamp_id={clamp_id}")

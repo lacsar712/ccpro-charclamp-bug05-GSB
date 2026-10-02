@@ -23,5 +23,8 @@ session_auth = SessionAuth[User, ServerSideSessionBackend](
     session_backend_config=ServerSideSessionConfig(
         session_id_bytes=32,
     ),
-    exclude=["/", "/login", "/logout", "/static", "/schema", "/favicon.ico"],
+    # 注意：exclude 按前缀匹配，绝不能放 "/"，否则所有路由都被跳过鉴权。
+    # 时间轴等页面的未登录跳转由各处理器自行 Redirect("/login")，
+    # 未放行页面则由 SessionAuth 抛 401，经 main.py 异常处理统一跳登录。
+    exclude=["/login", "/logout", "/static", "/schema", "/favicon.ico"],
 )
