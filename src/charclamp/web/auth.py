@@ -23,5 +23,7 @@ session_auth = SessionAuth[User, ServerSideSessionBackend](
     session_backend_config=ServerSideSessionConfig(
         session_id_bytes=32,
     ),
-    exclude=["/", "/login", "/logout", "/static", "/schema", "/favicon.ico"],
+    # 禁止放裸 "/"：Litestar SessionAuth 会按模式匹配，"/" 会跳过几乎全部路由的鉴权中间件，
+    # 首页再读 request.user 会直接 500（user not in scope）。
+    exclude=["/login", "/logout", "/static", "/schema", "/favicon.ico"],
 )

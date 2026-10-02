@@ -37,7 +37,7 @@
       <strong>{{ clamp.code }}</strong>
       <em>{{ status_labels.get(clamp.status, clamp.status) }} · {{ clamp.wood_species or '—' }}</em>
     </span>
-    {% if clamp.status != 'drawn' and chip_can_draw %}
+    {% if clamp.status != 'drawn' and can_draw %}
     <form method="post" action="/clamps/{{ clamp.id }}/draw-from-chip" onclick="event.stopPropagation()" style="margin-top:0.35rem">
       <button type="submit" class="btn ghost">剪影出炭</button>
     </form>
